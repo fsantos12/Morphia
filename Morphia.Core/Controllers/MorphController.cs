@@ -1,8 +1,10 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using Morphia.Core.Models;
 using Morphia.Core.Repositories;
 using Morphia.Core.Repositories.Exceptions;
+using Morphia.Core.Repositories.Queries;
 
 namespace Morphia.Core.Controllers;
 
@@ -136,7 +138,7 @@ public abstract class MorphController<T, K, Z> : ControllerBase where T : MorphM
     {
         try
         {
-            return Ok((await _repository.FindAsync(cancellationToken: cancellationToken)).Select(x => ConvertToDto(x)));
+            return Ok((await _repository.FindAsync(GetFilterDefinition(HttpContext.Request.Query), GetSortDefinition(HttpContext.Request.Query), GetProjectionDefinition(HttpContext.Request.Query), GetOffsetDefinition(HttpContext.Request.Query), GetLimitDefinition(HttpContext.Request.Query), cancellationToken)).Select(x => ConvertToDto(x)));
         }
         catch (NotFoundException e)
         {
@@ -151,5 +153,32 @@ public abstract class MorphController<T, K, Z> : ControllerBase where T : MorphM
             _logger.LogError(e, "Internal Server Error");
             return StatusCode(500);
         }
+    }
+
+    protected virtual FilterDefinition<T> GetFilterDefinition(IQueryCollection query)
+    {
+        var filter = new FilterDefinition<T>();
+        return filter;
+    }
+
+    protected virtual SortDefinition<T> GetSortDefinition(IQueryCollection query)
+    {
+        var sort = new SortDefinition<T>();
+        return sort;
+    }
+
+    protected virtual ProjectionDefinition<T> GetProjectionDefinition(IQueryCollection query)
+    {
+        var projection = new ProjectionDefinition<T>();
+        return projection;
+    }
+    protected virtual int GetOffsetDefinition(IQueryCollection query)
+    {
+        return 0;
+    }
+
+    protected virtual int GetLimitDefinition(IQueryCollection query)
+    {
+        return 0;
     }
 }
