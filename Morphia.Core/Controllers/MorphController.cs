@@ -138,7 +138,7 @@ public abstract class MorphController<T, K, Z> : ControllerBase where T : MorphM
     {
         try
         {
-            return Ok((await _repository.FindAsync(GetFilterDefinition(HttpContext.Request.Query), GetSortDefinition(HttpContext.Request.Query), GetProjectionDefinition(HttpContext.Request.Query), GetOffsetDefinition(HttpContext.Request.Query), GetLimitDefinition(HttpContext.Request.Query), cancellationToken)).Select(x => ConvertToDto(x)));
+            return Ok(await _repository.FindAsync(GetFilterDefinition(HttpContext.Request.Query), GetSortDefinition(HttpContext.Request.Query), GetProjectionDefinition(HttpContext.Request.Query), GetOffsetDefinition(HttpContext.Request.Query), GetLimitDefinition(HttpContext.Request.Query), cancellationToken));
         }
         catch (NotFoundException e)
         {
@@ -155,22 +155,19 @@ public abstract class MorphController<T, K, Z> : ControllerBase where T : MorphM
         }
     }
 
-    protected virtual FilterDefinition<T> GetFilterDefinition(IQueryCollection query)
+    protected virtual FilterDefinition<T>? GetFilterDefinition(IQueryCollection query)
     {
-        var filter = new FilterDefinition<T>();
-        return filter;
+        return null;
     }
 
-    protected virtual SortDefinition<T> GetSortDefinition(IQueryCollection query)
+    protected virtual SortDefinition<T>? GetSortDefinition(IQueryCollection query)
     {
-        var sort = new SortDefinition<T>();
-        return sort;
+        return null;
     }
 
-    protected virtual ProjectionDefinition<T> GetProjectionDefinition(IQueryCollection query)
+    protected virtual ProjectionDefinition<T>? GetProjectionDefinition(IQueryCollection query)
     {
-        var projection = new ProjectionDefinition<T>();
-        return projection;
+        return null;
     }
     protected virtual int GetOffsetDefinition(IQueryCollection query)
     {

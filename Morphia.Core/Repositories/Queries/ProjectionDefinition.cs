@@ -1,95 +1,209 @@
 using System.Dynamic;
 using System.Linq.Expressions;
 using System.Reflection;
+// Assuming you are using Entity Framework Core for ToListAsync
+// If not, you might need to adjust the materialization step.
+// For example, by adding 'using Microsoft.EntityFrameworkCore;'
+// or by making the ToListAsync call conditional or passed in.
+// For this example, I'll assume EF Core's ToListAsync is available.
+using Microsoft.EntityFrameworkCore;
 
 namespace Morphia.Core.Repositories.Queries;
 
-public class ProjectionDefinition<T> : List<string>
+/// <summary>
+/// Defines a set of properties to include in a database projection.
+/// This class transforms an IQueryable<T> by selecting only specified properties
+/// from the database and converting them into dynamic ExpandoObjects.
+/// </summary>
+/// <typeparam name="T">The type of the source object.</typeparam>
+public class ProjectionDefinition<T>
 {
-    // Add a property path to the projection list
+    private readonly HashSet<string> _includedPaths = new HashSet<string>(StringComparer.Ordinal);
+
+    public ProjectionDefinition() { }
+
+    public ProjectionDefinition(IEnumerable<string> propertyPaths)
+    {
+        ArgumentNullException.ThrowIfNull(propertyPaths);
+        foreach (var path in propertyPaths)
+        {
+            Include(path);
+        }
+    }
+
     public ProjectionDefinition<T> Include(string propertyPath)
     {
         if (!string.IsNullOrWhiteSpace(propertyPath))
         {
-            Add(propertyPath);
+            _includedPaths.Add(propertyPath.Trim());
         }
         return this;
     }
 
-    // Include a property using an expression
     public ProjectionDefinition<T> Include<TProperty>(Expression<Func<T, TProperty>> expression)
     {
-        var path = GetPropertyPath(expression.Body);
+        ArgumentNullException.ThrowIfNull(expression);
+        var path = GetPropertyPathFromExpression(expression.Body);
         return Include(path);
     }
 
-    // Apply the projection to the IQueryable<T>
-    public IQueryable<dynamic> ApplyProjection(IQueryable<T> query)
+    /// <summary>
+    /// Applies the defined projection to an IQueryable source, fetching data from the database
+    /// and converting it into a list of dynamic ExpandoObjects.
+    /// </summary>
+    /// <param name="query">The source IQueryable.</param>
+    /// <param name="cancellationToken">A CancellationToken to observe while waiting for the task to complete.</param>
+    /// <returns>A task that represents the asynchronous operation. The task result contains a list of dynamic ExpandoObjects.</returns>
+    /// <exception cref="InvalidOperationException">Thrown if a property path is invalid for type T.</exception>
+    public async Task<List<dynamic>> ApplyProjectionAsync(IQueryable<T> query, CancellationToken cancellationToken = default)
     {
-        var parameter = Expression.Parameter(typeof(T), "x");
+        ArgumentNullException.ThrowIfNull(query);
 
-        var bindings = new List<MemberBinding>();
+        // Step 1: Prepare the database projection query
+        var (projectedQuery, orderedPaths) = PrepareProjectedQuery(query);
 
-        foreach (var propPath in this)
-        {
-            var parts = propPath.Split('.');
-            Expression current = parameter;
+        // Step 2: Materialize the minimized data from the database
+        // This assumes EF Core's ToListAsync. If not using EF Core, this part needs adjustment.
+        List<object?[]> resultsAsArrays = await projectedQuery.ToListAsync(cancellationToken).ConfigureAwait(false);
 
-            foreach (var part in parts)
-            {
-                var prop = current.Type.GetProperty(part, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-                if (prop == null)
-                {
-                    throw new InvalidOperationException($"Property '{part}' not found on type '{current.Type.Name}'");
-                }
-                current = Expression.Property(current, prop);
-            }
-
-            // Get the last property from the path
-            var lastProperty = current.Type.GetProperty(parts.Last(), BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-            
-            // Ensure lastProperty is not null before creating the binding
-            if (lastProperty == null)
-            {
-                throw new InvalidOperationException($"Property '{parts.Last()}' not found on type '{current.Type.Name}'");
-            }
-
-            bindings.Add(Expression.Bind(lastProperty, current));  // Add the binding only if lastProperty is not null
-        }
-
-        var projection = Expression.MemberInit(Expression.New(typeof(ExpandoObject)), bindings);
-        var selector = Expression.Lambda<Func<T, dynamic>>(projection, parameter);
-
-        return query.Select(selector);
+        // Step 3: Convert the object arrays to ExpandoObjects (in-memory)
+        return [.. ProjectionDefinition<T>.ConvertToObjectArraysToExpandos(resultsAsArrays, orderedPaths)];
     }
 
-    // Get the value from the object based on the property path
-    private static object? GetValue(object obj, string path)
+    /// <summary>
+    /// Prepares an IQueryable for database-side projection by constructing a
+    /// SELECT statement to fetch only the specified properties into an object array.
+    /// This method does not execute the query.
+    /// </summary>
+    /// <param name="query">The source IQueryable.</param>
+    /// <returns>A tuple containing the modified IQueryable that projects to object[] and the ordered list of paths corresponding to array elements.</returns>
+    private (IQueryable<object?[]> Query, List<string> OrderedPaths) PrepareProjectedQuery(IQueryable<T> query)
     {
-        foreach (var part in path.Split('.'))
+        var orderedPaths = _includedPaths.OrderBy(p => p).ToList();
+
+        if (!orderedPaths.Any())
         {
-            if (obj == null) return null;
-
-            var prop = obj.GetType().GetProperty(part, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-            if (prop == null) return null;
-
-            var value = prop.GetValue(obj);
-            if (value == null) return null;
-
-            obj = value;
+            return (query.Select(e => new object?[0]), new List<string>());
         }
-        return obj;
+
+        var parameter = Expression.Parameter(typeof(T), "e");
+        var propertyAccessExpressions = new List<Expression>();
+
+        foreach (var path in orderedPaths)
+        {
+            Expression currentMemberAccess;
+            try
+            {
+                currentMemberAccess = GetNestedPropertyBody(parameter, path);
+            }
+            catch (ArgumentException ex)
+            {
+                throw new InvalidOperationException($"Projection path '{path}' is invalid for type '{typeof(T).FullName}'.", ex);
+            }
+            propertyAccessExpressions.Add(Expression.Convert(currentMemberAccess, typeof(object)));
+        }
+
+        var newArrayExpression = Expression.NewArrayInit(typeof(object), propertyAccessExpressions);
+        var selectorLambda = Expression.Lambda<Func<T, object?[]>>(newArrayExpression, parameter);
+
+        return (query.Select(selectorLambda), orderedPaths);
     }
 
-    // Convert an expression to a property path (e.g., x => x.Name -> "Name")
-    private static string GetPropertyPath(Expression expression)
+    /// <summary>
+    /// Converts a collection of object arrays (resulting from a database projection) into dynamic ExpandoObjects.
+    /// </summary>
+    private static IEnumerable<dynamic> ConvertToObjectArraysToExpandos(IEnumerable<object?[]> projectedData, List<string> orderedPaths)
+    {
+        // This method remains largely the same as before.
+        if (!orderedPaths.Any())
+        {
+            foreach (var _ in projectedData)
+            {
+                yield return new ExpandoObject();
+            }
+            yield break;
+        }
+
+        foreach (var objectArray in projectedData)
+        {
+            if (objectArray == null)
+            {
+                yield return new ExpandoObject();
+                continue;
+            }
+
+            if (objectArray.Length != orderedPaths.Count)
+            {
+                throw new ArgumentException("The number of values in the object array does not match the number of ordered paths.", "projectedData");
+            }
+
+            var expando = new ExpandoObject() as IDictionary<string, object?>;
+            for (int i = 0; i < orderedPaths.Count; i++)
+            {
+                SetNestedValue(expando, orderedPaths[i], objectArray[i]);
+            }
+            yield return expando;
+        }
+    }
+
+    // --- Private Helper Methods ---
+
+    private static string GetPropertyPathFromExpression(Expression expression)
     {
         var stack = new Stack<string>();
-        while (expression is MemberExpression memberExpr)
+        MemberExpression? memberExpr = expression as MemberExpression;
+
+        while (memberExpr != null)
         {
             stack.Push(memberExpr.Member.Name);
-            expression = memberExpr.Expression!;
+            if (memberExpr.Expression is ParameterExpression) break;
+            memberExpr = memberExpr.Expression as MemberExpression;
+        }
+
+        if (!stack.Any())
+        {
+            if (expression is ParameterExpression) return string.Empty;
+            throw new ArgumentException("Expression is not a valid property path for projection.", nameof(expression));
         }
         return string.Join(".", stack);
+    }
+
+    private static Expression GetNestedPropertyBody(Expression parameter, string propertyPath)
+    {
+        Expression currentExpression = parameter;
+        var parts = propertyPath.Split('.');
+
+        foreach (var part in parts)
+        {
+            if (string.IsNullOrEmpty(part)) throw new ArgumentException($"Invalid property path segment in '{propertyPath}'. Each part must be a valid property name.");
+
+            BindingFlags flags = BindingFlags.Public | BindingFlags.Instance; // Case-sensitive
+            PropertyInfo? propertyInfo = currentExpression.Type.GetProperty(part, flags);
+
+            if (propertyInfo == null)
+            {
+                throw new ArgumentException($"Property '{part}' not found on type '{currentExpression.Type.FullName}' in path '{propertyPath}'. Ensure the property exists and check casing.");
+            }
+            currentExpression = Expression.Property(currentExpression, propertyInfo);
+        }
+        return currentExpression;
+    }
+
+    private static void SetNestedValue(IDictionary<string, object?> target, string path, object? value)
+    {
+        var parts = path.Split('.');
+        var currentTarget = target;
+
+        for (int i = 0; i < parts.Length - 1; i++)
+        {
+            var part = parts[i];
+            if (!currentTarget.TryGetValue(part, out object? nextTargetObj) || !(nextTargetObj is IDictionary<string, object?>))
+            {
+                nextTargetObj = new ExpandoObject();
+                currentTarget[part] = nextTargetObj;
+            }
+            currentTarget = (IDictionary<string, object?>)nextTargetObj;
+        }
+        currentTarget[parts.Last()] = value;
     }
 }
